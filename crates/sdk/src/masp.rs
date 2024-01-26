@@ -51,8 +51,6 @@ use masp_proofs::bellman::groth16::PreparedVerifyingKey;
 use masp_proofs::bls12_381::Bls12;
 use masp_proofs::prover::LocalTxProver;
 use masp_proofs::sapling::SaplingVerificationContext;
-use namada_core::ibc::core::channel::types::msgs::PacketMsg;
-use namada_core::ibc::core::handler::types::msgs::MsgEnvelope;
 use namada_core::types::address::{Address, MASP};
 use namada_core::types::dec::Dec;
 use namada_core::types::ibc::IbcShieldedTransfer;
@@ -2355,13 +2353,8 @@ async fn extract_payload_from_shielded_action(
     match message {
         IbcMessage::Transfer(msg) => msg.shielded_transfer,
         IbcMessage::NftTransfer(msg) => msg.shielded_transfer,
-        IbcMessage::Envelope(envelope) => {
-            if let MsgEnvelope::Packet(PacketMsg::Recv(msg)) = *envelope {
-                namada_ibc::get_shielded_transfer(&msg)
-            } else {
-                None
-            }
-        }
+        IbcMessage::RecvPacket(msg) => msg.shielded_transfer,
+        IbcMessage::Envelope(_) => None,
     }
     .ok_or_else(|| {
         Error::Other(
