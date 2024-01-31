@@ -179,6 +179,7 @@ fn shielded_key_derive(
         unsafe_dont_encrypt,
         derivation_path,
         allow_non_compliant,
+        prompt_bip39_passphrase,
         use_device,
         ..
     }: args::KeyDerive,
@@ -205,6 +206,7 @@ fn shielded_key_derive(
                 alias_force,
                 derivation_path,
                 None,
+                prompt_bip39_passphrase,
                 encryption_password,
             )
             .unwrap_or_else(|| {
@@ -431,6 +433,7 @@ async fn transparent_key_and_address_derive(
         unsafe_dont_encrypt,
         derivation_path,
         allow_non_compliant,
+        prompt_bip39_passphrase,
         use_device,
         ..
     }: args::KeyDerive,
@@ -461,6 +464,7 @@ async fn transparent_key_and_address_derive(
                 alias_force,
                 derivation_path,
                 None,
+                prompt_bip39_passphrase,
                 encryption_password,
             )
             .unwrap_or_else(|| {
