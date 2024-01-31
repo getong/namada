@@ -68,7 +68,7 @@ use rand_core::{CryptoRng, OsRng, RngCore};
 use ripemd::Digest as RipemdDigest;
 use sha2::Digest;
 use thiserror::Error;
-use token::storage_key::is_any_shielded_action_balance_key;
+use token::storage_key::{balance_key, is_any_shielded_action_balance_key};
 use token::Amount;
 
 #[cfg(feature = "testing")]
@@ -518,6 +518,16 @@ pub type TransferDelta = HashMap<Address, MaspChange>;
 /// Represents the changes that were made to a list of shielded accounts
 pub type TransactionDelta = HashMap<ViewingKey, I128Sum>;
 
+#[derive(BorshSerialize, BorshDeserialize, Debug)]
+/// The possible sync states of the shielded context
+pub enum ContextSyncStatus {
+    /// The context contains only data that has been confirmed by the protocol
+    Confirmed,
+    /// The context contains that that has not yet been confirmed by the
+    /// protocol and could end up being invalid
+    Speculative,
+}
+
 /// Represents the current state of the shielded pool from the perspective of
 /// the chosen viewing keys.
 #[derive(BorshSerialize, BorshDeserialize, Debug)]
@@ -550,6 +560,8 @@ pub struct ShieldedContext<U: ShieldedUtils> {
     pub asset_types: HashMap<AssetType, AssetData>,
     /// Maps note positions to their corresponding viewing keys
     pub vk_map: HashMap<usize, ViewingKey>,
+    /// The sync state of the context
+    pub sync_status: ContextSyncStatus,
 }
 
 /// Default implementation to ease construction of TxContexts. Derive cannot be
@@ -570,6 +582,7 @@ impl<U: ShieldedUtils + Default> Default for ShieldedContext<U> {
             delta_map: BTreeMap::default(),
             asset_types: HashMap::default(),
             vk_map: HashMap::default(),
+            sync_status: ContextSyncStatus::Confirmed,
         }
     }
 }
@@ -578,12 +591,25 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
     /// Try to load the last saved shielded context from the given context
     /// directory. If this fails, then leave the current context unchanged.
     pub async fn load(&mut self) -> std::io::Result<()> {
-        self.utils.clone().load(self).await
+        self.utils.clone().load(self).await?;
+        self.sync_status = ContextSyncStatus::Confirmed;
+
+        Ok(())
     }
 
     /// Save this shielded context into its associated context directory
-    pub async fn save(&self) -> std::io::Result<()> {
-        self.utils.save(self).await
+    pub async fn save(&self) -> Result<(), Error> {
+        match self.sync_status {
+            ContextSyncStatus::Confirmed => self
+                .utils
+                .save(self)
+                .await
+                .map_err(|e| Error::Other(e.to_string())),
+            ContextSyncStatus::Speculative => Err(Error::Other(
+                "Cannot save the state of a speculative shielded context"
+                    .to_string(),
+            )),
+        }
     }
 
     /// Merge data from the given shielded context into the current shielded
@@ -613,6 +639,9 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
             tfer_delta.extend(ntfer_delta);
             tx_delta.extend(ntx_delta);
         }
+        if let ContextSyncStatus::Speculative = new_ctx.sync_status {
+            self.sync_status = ContextSyncStatus::Speculative;
+        }
     }
 
     /// Fetch the current state of the multi-asset shielded pool into a
@@ -623,6 +652,11 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
         sks: &[ExtendedSpendingKey],
         fvks: &[ViewingKey],
     ) -> Result<(), Error> {
+        if let ContextSyncStatus::Speculative = self.sync_status {
+            // Reload the state from file to get the last confirmed state and
+            // discard any speculative data
+            self.load().await.map_err(|e| Error::Other(e.to_string()))?;
+        }
         // First determine which of the keys requested to be fetched are new.
         // Necessary because old transactions will need to be scanned for new
         // keys.
@@ -1867,9 +1901,6 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
         token: &Address,
         amount: token::DenominatedAmount,
     ) -> Result<Option<ShieldedTransfer>, TransferErr> {
-        // No shielded components are needed when neither source nor destination
-        // are shielded
-
         use rand::rngs::StdRng;
         use rand_core::SeedableRng;
 
@@ -2305,6 +2336,19 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
                         .await
                         .map_err(|e| Error::Other(e.to_string()))?;
                 }
+
+                // Cache the generated transfer
+                let native_token = query_native_token(context.client()).await?;
+                let mut shielded_ctx = context.shielded_mut().await;
+                shielded_ctx.pre_cache_transaction(
+                    &built.masp_tx,
+                    source,
+                    target,
+                    token,
+                    epoch,
+                    native_token,
+                )?;
+
                 Ok(Some(built))
             }
         }
@@ -2315,8 +2359,64 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
             let built = build_transfer(
                 context.shielded().await.utils.local_tx_prover(),
             )?;
+            let native_token = query_native_token(context.client()).await?;
+            let mut shielded_ctx = context.shielded_mut().await;
+            shielded_ctx.pre_cache_transaction(
+                &built.masp_tx,
+                source,
+                target,
+                token,
+                epoch,
+                native_token,
+            )?;
             Ok(Some(built))
         }
+    }
+
+    // Updates the internal state with the data of the newly generated
+    // transaction
+    fn pre_cache_transaction(
+        &mut self,
+        masp_tx: &Transaction,
+        source: &TransferSource,
+        target: &TransferTarget,
+        token: &Address,
+        epoch: Epoch,
+        native_token: Address,
+    ) -> Result<(), Error> {
+        // This data will be discarded at the next fetch so we don't need to
+        // populate it accurately
+        let indexed_tx = self.last_indexed.map_or_else(
+            || IndexedTx {
+                height: 1.into(),
+                index: TxIndex(0),
+            },
+            |indexed| IndexedTx {
+                height: indexed.height,
+                index: indexed.index + 1,
+            },
+        );
+        // Need to mock the changed balance keys
+        let mut changed_balance_keys = BTreeSet::default();
+        match (source.effective_address(), target.effective_address()) {
+            // Shielded transactions don't write balance keys
+            (MASP, MASP) => (),
+            (source, target) => {
+                changed_balance_keys.insert(balance_key(token, &source));
+                changed_balance_keys.insert(balance_key(token, &target));
+            }
+        }
+
+        self.scan_tx(
+            indexed_tx,
+            epoch,
+            &changed_balance_keys,
+            masp_tx,
+            native_token,
+        )?;
+        self.sync_status = ContextSyncStatus::Speculative;
+
+        Ok(())
     }
 
     /// Obtain the known effects of all accepted shielded and transparent
