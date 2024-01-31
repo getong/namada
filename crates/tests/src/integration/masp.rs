@@ -1270,6 +1270,8 @@ fn masp_txs_and_queries() -> Result<()> {
 /// success
 /// 3. Submit a new wrapper with an invalid unshielding tx and assert the
 /// failure
+/// 4. Submit another transaction with valid fee unshielding and an inner
+/// shielded transfer with the same source
 #[test]
 fn wrapper_fee_unshielding() -> Result<()> {
     // This address doesn't matter for tests. But an argument is required.
@@ -1286,15 +1288,15 @@ fn wrapper_fee_unshielding() -> Result<()> {
         vec![
             "transfer",
             "--source",
-            ALBERT,
+            ALBERT_KEY,
             "--target",
             AA_PAYMENT_ADDRESS,
             "--token",
             NAM,
             "--amount",
-            "500000",
+            "1979999", // Reduce the balance of the fee payer artificially
             "--gas-price",
-            "30", // Reduce the balance of the fee payer artificially
+            "1",
             "--gas-limit",
             "20000",
             "--ledger-address",
@@ -1302,6 +1304,40 @@ fn wrapper_fee_unshielding() -> Result<()> {
         ],
     )?;
     node.assert_success();
+    let captured = CapturedOutput::of(|| {
+        run(
+            &node,
+            Bin::Client,
+            vec![
+                "balance",
+                "--owner",
+                ALBERT_KEY,
+                "--token",
+                NAM,
+                "--node",
+                validator_one_rpc,
+            ],
+        )
+    });
+    assert!(captured.result.is_ok());
+    assert!(captured.contains("nam: 1"));
+    let captured = CapturedOutput::of(|| {
+        run(
+            &node,
+            Bin::Client,
+            vec![
+                "balance",
+                "--owner",
+                AA_VIEWING_KEY,
+                "--token",
+                NAM,
+                "--node",
+                validator_one_rpc,
+            ],
+        )
+    });
+    assert!(captured.result.is_ok());
+    assert!(captured.contains("nam: 1979999"));
 
     _ = node.next_epoch();
     // 2. Valid unshielding
@@ -1311,12 +1347,14 @@ fn wrapper_fee_unshielding() -> Result<()> {
         vec![
             "transfer",
             "--source",
-            ALBERT,
+            ALBERT_KEY,
             "--target",
             BERTHA,
             "--token",
             NAM,
             "--amount",
+            "1",
+            "--gas-price",
             "1",
             "--gas-limit",
             "20000",
@@ -1327,12 +1365,46 @@ fn wrapper_fee_unshielding() -> Result<()> {
         ],
     )?;
     node.assert_success();
+    let captured = CapturedOutput::of(|| {
+        run(
+            &node,
+            Bin::Client,
+            vec![
+                "balance",
+                "--owner",
+                ALBERT_KEY,
+                "--token",
+                NAM,
+                "--node",
+                validator_one_rpc,
+            ],
+        )
+    });
+    assert!(captured.result.is_ok());
+    assert!(captured.contains("nam: 0"));
+    let captured = CapturedOutput::of(|| {
+        run(
+            &node,
+            Bin::Client,
+            vec![
+                "balance",
+                "--owner",
+                AA_VIEWING_KEY,
+                "--token",
+                NAM,
+                "--node",
+                validator_one_rpc,
+            ],
+        )
+    });
+    assert!(captured.result.is_ok());
+    assert!(captured.contains("nam: 1959999"));
 
     // 3. Invalid unshielding
     let tx_args = vec![
         "transfer",
         "--source",
-        ALBERT,
+        ALBERT_KEY,
         "--target",
         BERTHA,
         "--token",
@@ -1358,6 +1430,53 @@ fn wrapper_fee_unshielding() -> Result<()> {
         "{:?} unexpectedly succeeded",
         tx_args
     );
+
+    // 4. Try another valid fee unshielding and masp transaction in the same tx,
+    // with the same source. This tests that the client can properly fetch data
+    // and construct these kind of transactions
+    run(
+        &node,
+        Bin::Client,
+        vec![
+            "transfer",
+            "--source",
+            A_SPENDING_KEY,
+            "--target",
+            AB_PAYMENT_ADDRESS,
+            "--token",
+            NAM,
+            "--amount",
+            "1",
+            "--gas-price",
+            "1",
+            "--gas-limit",
+            "20000",
+            "--gas-payer",
+            ALBERT_KEY,
+            "--gas-spending-key",
+            A_SPENDING_KEY,
+            "--ledger-address",
+            validator_one_rpc,
+        ],
+    )?;
+    node.assert_success();
+    let captured = CapturedOutput::of(|| {
+        run(
+            &node,
+            Bin::Client,
+            vec![
+                "balance",
+                "--owner",
+                AA_VIEWING_KEY,
+                "--token",
+                NAM,
+                "--node",
+                validator_one_rpc,
+            ],
+        )
+    });
+    assert!(captured.result.is_ok());
+    assert!(captured.contains("nam: 1939998"));
 
     Ok(())
 }
