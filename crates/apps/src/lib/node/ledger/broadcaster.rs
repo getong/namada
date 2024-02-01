@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
 
-use namada::types::control_flow::time;
+use namada::control_flow::time;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::facade::tendermint_rpc::{Client, HttpClient};
