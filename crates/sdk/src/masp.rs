@@ -598,17 +598,13 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
     }
 
     /// Save this shielded context into its associated context directory
-    pub async fn save(&self) -> Result<(), Error> {
+    pub async fn save(&self) -> std::io::Result<()> {
         match self.sync_status {
-            ContextSyncStatus::Confirmed => self
-                .utils
-                .save(self)
-                .await
-                .map_err(|e| Error::Other(e.to_string())),
-            ContextSyncStatus::Speculative => Err(Error::Other(
-                "Cannot save the state of a speculative shielded context"
-                    .to_string(),
-            )),
+            ContextSyncStatus::Confirmed => self.utils.save(self).await,
+            ContextSyncStatus::Speculative => {
+                tracing::debug!("Cannot save a speculative context to file");
+                Ok(())
+            }
         }
     }
 
@@ -654,8 +650,13 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
     ) -> Result<(), Error> {
         if let ContextSyncStatus::Speculative = self.sync_status {
             // Reload the state from file to get the last confirmed state and
-            // discard any speculative data
-            self.load().await.map_err(|e| Error::Other(e.to_string()))?;
+            // discard any speculative data, we cannot fetch on top of a
+            // speculative state
+            if self.load().await.is_err() {
+                // Initialize a default context if we couldn't load a valid one
+                // from storage
+                *self = Default::default();
+            }
         }
         // First determine which of the keys requested to be fetched are new.
         // Necessary because old transactions will need to be scanned for new
@@ -1904,6 +1905,8 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
         use rand::rngs::StdRng;
         use rand_core::SeedableRng;
 
+        // FIXME: document better that the state is brought back to Confirmed
+        // when fetching, when reloading or when relaunching the client
         let spending_key = source.spending_key();
         let payment_address = target.payment_address();
         // No shielded components are needed when neither source nor
@@ -2321,6 +2324,17 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
                 let loaded: ShieldedTransfer =
                     BorshDeserialize::try_from_slice(&loaded_bytes)
                         .map_err(|_e| Error::Other(exp_str))?;
+                // Cache the generated transfer
+                let native_token = query_native_token(context.client()).await?;
+                let mut shielded_ctx = context.shielded_mut().await;
+                shielded_ctx.pre_cache_transaction(
+                    &loaded.masp_tx,
+                    source,
+                    target,
+                    token,
+                    epoch,
+                    native_token,
+                )?;
 
                 Ok(Some(loaded))
             } else {
@@ -2396,6 +2410,7 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
                 index: indexed.index + 1,
             },
         );
+        eprintln!("NED INDEXED TX: {:#?}", indexed_tx); //FIXME: remove
         // Need to mock the changed balance keys
         let mut changed_balance_keys = BTreeSet::default();
         match (source.effective_address(), target.effective_address()) {
@@ -2406,6 +2421,7 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
                 changed_balance_keys.insert(balance_key(token, &target));
             }
         }
+        eprintln!("PRE CACHE CHANGED KEYS: {:#?}", changed_balance_keys); //FIXME: remove
 
         self.scan_tx(
             indexed_tx,
